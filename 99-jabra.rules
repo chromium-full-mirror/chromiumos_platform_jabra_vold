@@ -1,0 +1,22 @@
+# Copyright (c) 2013 The Chromium OS Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+SUBSYSTEM!="usb", GOTO="jabra_end"
+ENV{DEVTYPE}!="usb_device", GOTO="jabra_end"
+
+# Jabra Speakerphone 410
+ATTRS{idVendor}=="0b0e", ATTRS{idProduct}=="0412", GOTO="jabra_action"
+# Jabra Speakerphone 510
+ATTRS{idVendor}=="0b0e", ATTRS{idProduct}=="0420", GOTO="jabra_action"
+
+GOTO="jabra_end"
+
+LABEL="jabra_action"
+
+# start or restart the jabra_vold daemon
+ACTION=="add|change", RUN+="/sbin/initctl emit jabra_vold DEVNUM=%s{devnum} BUSNUM=%s{busnum}"
+# stop the daemon
+ACTION=="remove", RUN+="/sbin/initctl stop jabra-vold"
+
+LABEL="jabra_end"
