@@ -255,8 +255,11 @@ static void handle_hid_event(struct jabra_dev *dev,
 			break;
 		}
 	} else if (report == JABRA_TELEPHONY_REPORT) { /* other keys */
-		if (code & MUTE_FLAG)
-			inject_hid_event(dev, KEY_CROS_MUTE);
+		/*
+		 * if 'code' has the MUTE_FLAG bit set, the user has pressed
+		 * the mic mute button, but the UI is not handling mic mute key
+		 * so far (only speaker mute), so we don't inject any HID event.
+		 */
 	} else {
 		logd(LOG_NOTICE, "HID message %02x %02x\n", report, code);
 	}
