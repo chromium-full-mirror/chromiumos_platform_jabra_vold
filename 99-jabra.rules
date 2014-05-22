@@ -6,17 +6,17 @@ SUBSYSTEM!="usb", GOTO="jabra_end"
 ENV{DEVTYPE}!="usb_device", GOTO="jabra_end"
 
 # Jabra Speakerphone 410
-ATTRS{idVendor}=="0b0e", ATTRS{idProduct}=="0412", GOTO="jabra_action"
+ENV{ID_VENDOR_ID}=="0b0e", ENV{ID_MODEL_ID}=="0412", GOTO="jabra_action"
 # Jabra Speakerphone 510
-ATTRS{idVendor}=="0b0e", ATTRS{idProduct}=="0420", GOTO="jabra_action"
+ENV{ID_VENDOR_ID}=="0b0e", ENV{ID_MODEL_ID}=="0420", GOTO="jabra_action"
 
 GOTO="jabra_end"
 
 LABEL="jabra_action"
 
-# start or restart the jabra_vold daemon
-ACTION=="add|change", RUN+="/sbin/initctl emit jabra_vold DEVNUM=%s{devnum} BUSNUM=%s{busnum}"
+# start the jabra_vold daemon
+ACTION=="add", RUN+="/usr/sbin/jabra_vold -a start -n $env{DEVNUM} -b $env{BUSNUM}"
 # stop the daemon
-ACTION=="remove", RUN+="/sbin/initctl stop jabra-vold"
+ACTION=="remove", RUN+="/usr/sbin/jabra_vold -a stop -n $env{DEVNUM} -b $env{BUSNUM}"
 
 LABEL="jabra_end"

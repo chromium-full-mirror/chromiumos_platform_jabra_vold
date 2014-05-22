@@ -47,6 +47,9 @@ enum jabra_report {
 #define KEY_CROS_VOLDOWN KEY_VOLUMEDOWN
 #define KEY_CROS_VOLUP KEY_VOLUMEUP
 
+/* Maximum number of supported Alsa devices for Jabra */
+#define ALSA_DEV_COUNT_MAX 4
+
 /*
  * Linux kernel usbmon binary interface format
  * from Documentation/usb/usbmon.txt
@@ -83,8 +86,9 @@ struct usbmon_packet {
 /* device context */
 struct jabra_dev {
 	int uinput_fd;
-	snd_hctl_t *hctl;
-	snd_hctl_elem_t *playback_vol;
+	int alsa_dev_count;
+	snd_hctl_t *hctl[ALSA_DEV_COUNT_MAX];
+	snd_hctl_elem_t *playback_vol[ALSA_DEV_COUNT_MAX];
 	int mon_fd;
 	int devnum;
 };
@@ -103,19 +107,22 @@ static void logd(int level, const char *fmt, ...)
 static int alsa_touch_volume(struct jabra_dev *dev)
 {
 	snd_ctl_elem_value_t *elem;
-	int err;
+	int err = 0, idx;
 
 	snd_ctl_elem_value_alloca(&elem);
-	err = snd_hctl_elem_read(dev->playback_vol, elem);
-	if (err < 0)
-		return err;
-	err = snd_hctl_elem_write(dev->playback_vol, elem);
-	if (err < 0)
-		return err;
-	logd(LOG_INFO, "Touch volume: %ld\n",
-		snd_ctl_elem_value_get_integer(elem, 0));
+	for (idx = 0; idx < dev->alsa_dev_count; ++idx) {
+		err = snd_hctl_elem_read(dev->playback_vol[idx], elem);
+		if (err < 0)
+			goto return_err;
+		err = snd_hctl_elem_write(dev->playback_vol[idx], elem);
+		if (err < 0)
+			goto return_err;
+		logd(LOG_INFO, "Touch volume: %ld\n",
+			snd_ctl_elem_value_get_integer(elem, 0));
+	}
 
-	return 0;
+return_err:
+	return (err < 0) ? err : 0;
 }
 
 static int alsa_init(struct jabra_dev *dev)
@@ -124,7 +131,7 @@ static int alsa_init(struct jabra_dev *dev)
 	snd_ctl_elem_id_t *id;
 	int idx;
 	char *card_name;
-	char *hwid = NULL;
+	char *hwid[ALSA_DEV_COUNT_MAX] = { NULL, };
 	time_t deadline = time(NULL) + 5 /* 5-second timeout */;
 
 	while (time(NULL) < deadline) {
@@ -132,17 +139,20 @@ static int alsa_init(struct jabra_dev *dev)
 		for (idx = -1; (snd_card_next(&idx) == 0) && (idx >= 0); ) {
 			ret = snd_card_get_name(idx, &card_name);
 			if (!ret && (strncmp(card_name, ALSA_DEV_NAME,
-			     sizeof(ALSA_DEV_NAME) - 1) == 0)) {
-				ret = asprintf(&hwid, "hw:%d", idx);
+				sizeof(ALSA_DEV_NAME) - 1) == 0)) {
+				ret = asprintf(&hwid[dev->alsa_dev_count], "hw:%d", idx);
 				logd(LOG_NOTICE, "ALSA dev %s (%s)\n",
-							hwid, card_name);
+						hwid[dev->alsa_dev_count], card_name);
 				free(card_name);
-				break;
+				if (dev->alsa_dev_count++ >= ALSA_DEV_COUNT_MAX) {
+					logd(LOG_ERR, "Too many ALSA devices found for Jabra\n");
+					break;
+				}
 			}
 			if (!ret)
 				free(card_name);
 		}
-		if (hwid)
+		if (dev->alsa_dev_count)
 			break;
 		logd(LOG_INFO, "no ALSA device, retry later ...\n");
 		/*
@@ -151,33 +161,40 @@ static int alsa_init(struct jabra_dev *dev)
 		 */
 		usleep(250000);
 	}
-	if (!hwid) {
+	if (!dev->alsa_dev_count) {
 		logd(LOG_ERR, "Cannot find ALSA device for Jabra\n");
 		return -ENODEV;
 	}
 
 	/* initialize the Jabra USB-audio mixer control */
-	ret = snd_hctl_open(&dev->hctl, hwid, 0);
-	if (ret < 0)
-		return -ENODEV;
-	ret = snd_hctl_load(dev->hctl);
-	if (ret < 0)
-		goto fail_after_open;
+	for (idx = 0; idx < dev->alsa_dev_count; ++idx) {
+		ret = snd_hctl_open(&dev->hctl[idx], hwid[idx], 0);
+		if (ret < 0)
+			return -ENODEV;
+		ret = snd_hctl_load(dev->hctl[idx]);
+		if (ret < 0)
+			goto fail_after_open;
 
-	snd_ctl_elem_id_alloca(&id);
-	snd_ctl_elem_id_set_interface(id, SND_CTL_ELEM_IFACE_MIXER);
-	snd_ctl_elem_id_set_name(id, ALSA_CONTROL_NAME);
-	dev->playback_vol = snd_hctl_find_elem(dev->hctl, id);
-	if (!dev->playback_vol)
-		goto fail_after_open;
+		snd_ctl_elem_id_alloca(&id);
+		snd_ctl_elem_id_set_interface(id, SND_CTL_ELEM_IFACE_MIXER);
+		snd_ctl_elem_id_set_name(id, ALSA_CONTROL_NAME);
+		dev->playback_vol[idx] = snd_hctl_find_elem(dev->hctl[idx], id);
+		if (!dev->playback_vol[idx])
+			goto fail_after_open;
 
-	free(hwid);
+		free(hwid[idx]);
+	}
 	return 0;
 
 fail_after_open:
 	logd(LOG_ERR, "alsa initialization failed (%d)\n", ret);
-	snd_hctl_close(dev->hctl);
-	free(hwid);
+	for (idx = 0; idx < dev->alsa_dev_count; ++idx) {
+		if (dev->hctl[idx]) {
+			snd_hctl_close(dev->hctl[idx]);
+			dev->hctl[idx] = NULL;
+		}
+		free(hwid[idx]);
+	}
 	return ret;
 }
 
@@ -186,7 +203,12 @@ static int hid_init(struct jabra_dev *dev)
 	int ret;
 	size_t count;
 	char* uidev_ptr;
-	struct uinput_user_dev uidev;
+	struct uinput_user_dev *uidev = calloc(1, sizeof(struct uinput_user_dev));
+
+	if (!uidev) {
+		logd(LOG_ERR, "Failed to allocate uinput_user_dev buffer");
+		return -ENOMEM;
+	}
 
 	dev->uinput_fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
 	if (dev->uinput_fd < 0) {
@@ -199,11 +221,11 @@ static int hid_init(struct jabra_dev *dev)
 	ioctl(dev->uinput_fd, UI_SET_KEYBIT, KEY_CROS_VOLDOWN);
 	ioctl(dev->uinput_fd, UI_SET_KEYBIT, KEY_CROS_VOLUP);
 
-	snprintf(uidev.name, UINPUT_MAX_NAME_SIZE, "jabra_vold input device");
-	uidev.id.bustype = BUS_USB;
-	uidev.id.version = 1;
+	snprintf(uidev->name, UINPUT_MAX_NAME_SIZE, "jabra_vold input device");
+	uidev->id.bustype = BUS_USB;
+	uidev->id.version = 1;
 
-	for (uidev_ptr = (char*)&uidev, count = sizeof(uidev); count; ) {
+	for (uidev_ptr = (char*)uidev, count = sizeof(*uidev); count; ) {
 		int written = write(dev->uinput_fd, uidev_ptr, count);
 		if (written < 0) {
 			if (errno == EINTR || errno == EAGAIN) continue;
@@ -221,11 +243,13 @@ static int hid_init(struct jabra_dev *dev)
 		goto fail_exit;
 	}
 
+	free(uidev);
 	return 0;
 
 fail_exit:
 	close(dev->uinput_fd);
 	dev->uinput_fd = 0;
+	free(uidev);
 	return ret;
 }
 
@@ -339,7 +363,7 @@ fail_free:
 static int use_jabra_device(int busnum, int devnum, int loglvl, int errlog)
 {
 	struct jabra_dev *dev;
-	int ret;
+	int idx, ret;
 
 	/* setup the syslog facility and honor UDEV log level if set */
 	openlog(DAEMON_NAME, errlog ? LOG_PERROR : 0, LOG_DAEMON);
@@ -366,8 +390,10 @@ static int use_jabra_device(int busnum, int devnum, int loglvl, int errlog)
 err:
 	if (dev->mon_fd)
 		close(dev->mon_fd);
-	if (dev->hctl)
-		snd_hctl_close(dev->hctl);
+	for (idx = 0; idx < dev->alsa_dev_count; ++idx) {
+		if (dev->hctl[idx])
+			snd_hctl_close(dev->hctl[idx]);
+	}
 	if (dev->uinput_fd) {
 		ioctl(dev->uinput_fd, UI_DEV_DESTROY);
 		close(dev->uinput_fd);
@@ -380,15 +406,21 @@ err:
 int main(int argc, char *argv[])
 {
 	int opt;
+	char *action_str = "start";
 	char *busnum_str = getenv("BUSNUM");
 	char *devnum_str = getenv("DEVNUM");
 	char *loglevel_str = getenv("LOGLEVEL");
+	char pid_filename[128];
 	int use_stderr = 0;
 	int busnum, devnum;
 	int loglevel = LOG_NOTICE;
+	int pid;
 
-	while ((opt = getopt(argc, argv, "b:d:n:")) != -1) {
+	while ((opt = getopt(argc, argv, "a:b:d:n:")) != -1) {
 		switch (opt) {
+		case 'a':
+			action_str = optarg;
+			break;
 		case 'b':
 			busnum_str = optarg;
 			break;
@@ -410,6 +442,60 @@ int main(int argc, char *argv[])
 	devnum = atoi(devnum_str);
 	if (loglevel_str)
 		loglevel = atoi(loglevel_str);
+	snprintf(pid_filename, sizeof(pid_filename), "/var/run/jabra_vold.%d.%d.pid",
+			busnum, devnum);
+
+	if (strcmp(action_str, "start") == 0) {
+		pid = fork();
+		if (pid < 0) {
+			fprintf(stderr, "Failed to fork child process\n");
+			return -ENOMEM;
+		}
+		if (pid != 0) {
+			logd(LOG_INFO, "Started jabra_vold child process %d.\n", pid);
+			return 0;
+		}
+		pid = fork();
+		if (pid < 0) {
+			fprintf(stderr, "Failed to fork grandchild process\n");
+			return -ENOMEM;
+		}
+		if (pid != 0) {
+			FILE* pid_file = fopen(pid_filename, "w");
+			if (!pid_file) {
+				fprintf(stderr, "Failed to open PID file to write for jabra_vold %d:%d\n",
+						busnum, devnum);
+				return -ENOMEM;
+			}
+			logd(LOG_INFO, "Started jabra_vold grandchild process %d.\n", pid);
+			if (fprintf(pid_file, "%d\n", pid) <= 0) {
+				fprintf(stderr, "Failed to write PID to the PID file.\n");
+				return -ENOMEM;
+			}
+			fclose(pid_file);
+			return 0;
+		}
+	} else if (strcmp(action_str, "stop") == 0) {
+		FILE* pid_file = fopen(pid_filename, "r");
+		if (!pid_file) {
+			fprintf(stderr, "Failed to open PID file to read for jabra_vold %d:%d\n",
+					busnum, devnum);
+			return -ENOMEM;
+		}
+		if (fscanf(pid_file, "%d", &pid) <= 0) {
+			fprintf(stderr, "Failed to obtain PID for jabra_vold %d:%d\n",
+					busnum, devnum);
+			return -ENOMEM;
+		}
+		fclose(pid_file);
+		remove(pid_filename);
+		logd(LOG_INFO, "Stopping jabra_vold process %d\n", pid);
+		kill(pid, SIGKILL);
+		return 0;
+	} else {
+		fprintf(stderr, "Unrecognized action string '%s'\n", action_str);
+		return -EINVAL;
+	}
 
 	return use_jabra_device(busnum, devnum, loglevel, use_stderr);
 }
