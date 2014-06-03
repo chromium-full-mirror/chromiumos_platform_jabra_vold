@@ -19,6 +19,7 @@
 
 #include <alsa/asoundlib.h>
 #include <linux/input.h>
+#include <linux/uinput.h>
 
 #define DAEMON_NAME "jabra_vold"
 
@@ -43,15 +44,8 @@ enum jabra_report {
 #define ALSA_DEV_NAME "Jabra SPEAK"
 #define ALSA_CONTROL_NAME "PCM Playback Volume"
 
-/* shell pattern to find the keyboard input device node */
-#define INPUT_DEV_PATTERN "/dev/input/by-path/*-event-kbd"
-
-/* ChromeOS keyboard is using F9 rather than KEY_VOLUMEDOWN */
-#define KEY_CROS_VOLDOWN KEY_F9
-/* ChromeOS keyboard is using F10 rather than KEY_VOLUMEUP */
-#define KEY_CROS_VOLUP KEY_F10
-/* ChromeOS keyboard is using F8 rather than KEY_MICMUTE */
-#define KEY_CROS_MUTE KEY_F8
+#define KEY_CROS_VOLDOWN KEY_VOLUMEDOWN
+#define KEY_CROS_VOLUP KEY_VOLUMEUP
 
 /*
  * Linux kernel usbmon binary interface format
@@ -88,7 +82,7 @@ struct usbmon_packet {
 
 /* device context */
 struct jabra_dev {
-	FILE *evdev;
+	int uinput_fd;
 	snd_hctl_t *hctl;
 	snd_hctl_elem_t *playback_vol;
 	int mon_fd;
@@ -190,24 +184,49 @@ fail_after_open:
 static int hid_init(struct jabra_dev *dev)
 {
 	int ret;
-	glob_t globbuf;
+	size_t count;
+	char* uidev_ptr;
+	struct uinput_user_dev uidev;
 
-	globbuf.gl_offs = 0;
-	ret = glob(INPUT_DEV_PATTERN, GLOB_NOESCAPE, NULL, &globbuf);
-	if (ret) {
-		logd(LOG_ERR, "Cannot find keyboard input device\n");
-		return -ENODEV;
+	dev->uinput_fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
+	if (dev->uinput_fd < 0) {
+		logd(LOG_ERR, "Cannot open uinput for HID event injection\n");
+		return -ENOMEM;
 	}
-	logd(LOG_NOTICE, "Using %s for HID event injection\n",
-		globbuf.gl_pathv[0]);
 
-	dev->evdev = fopen(globbuf.gl_pathv[0],"w");
-	globfree(&globbuf);
-	if (!dev->evdev) {
-		logd(LOG_ERR, "Cannot open evdev for HID event injection\n");
-		return errno;
+	ioctl(dev->uinput_fd, UI_SET_EVBIT, EV_KEY);
+	ioctl(dev->uinput_fd, UI_SET_EVBIT, EV_SYN);
+	ioctl(dev->uinput_fd, UI_SET_KEYBIT, KEY_CROS_VOLDOWN);
+	ioctl(dev->uinput_fd, UI_SET_KEYBIT, KEY_CROS_VOLUP);
+
+	snprintf(uidev.name, UINPUT_MAX_NAME_SIZE, "jabra_vold input device");
+	uidev.id.bustype = BUS_USB;
+	uidev.id.version = 1;
+
+	for (uidev_ptr = (char*)&uidev, count = sizeof(uidev); count; ) {
+		int written = write(dev->uinput_fd, uidev_ptr, count);
+		if (written < 0) {
+			if (errno == EINTR || errno == EAGAIN) continue;
+			logd(LOG_ERR, "Failed to configure input device\n");
+			ret = errno;
+			goto fail_exit;
+		} else {
+			uidev_ptr += written;
+			count -= written;
+		}
 	}
+	ret = ioctl(dev->uinput_fd, UI_DEV_CREATE);
+	if (ret < 0) {
+		logd(LOG_ERR, "Failed to create input device\n");
+		goto fail_exit;
+	}
+
 	return 0;
+
+fail_exit:
+	close(dev->uinput_fd);
+	dev->uinput_fd = 0;
+	return ret;
 }
 
 static void inject_hid_event(struct jabra_dev *dev, uint8_t key)
@@ -220,19 +239,18 @@ static void inject_hid_event(struct jabra_dev *dev, uint8_t key)
 	if (ret)
 		logd(LOG_WARNING, "Cannot get time\n");
 	/* key press event */
-	ret = fwrite(&evt, 1, sizeof(evt), dev->evdev);
+	ret = write(dev->uinput_fd, &evt, sizeof(evt));
 	if (ret < 0)
 		logd(LOG_WARNING, "Cannot inject HID event\n");
 	/* key release event */
 	evt.value = 0;
-	ret = fwrite(&evt, 1, sizeof(evt), dev->evdev);
+	ret = write(dev->uinput_fd, &evt, sizeof(evt));
 	if (ret < 0)
 		logd(LOG_WARNING, "Cannot inject HID event\n");
 	syn.time = evt.time;
-	ret = fwrite(&syn, 1, sizeof(syn), dev->evdev);
+	ret = write(dev->uinput_fd, &syn, sizeof(syn));
 	if (ret < 0)
 		logd(LOG_WARNING, "Cannot inject HID SYN report\n");
-	fflush(dev->evdev);
 }
 
 static void handle_hid_event(struct jabra_dev *dev,
@@ -350,8 +368,10 @@ err:
 		close(dev->mon_fd);
 	if (dev->hctl)
 		snd_hctl_close(dev->hctl);
-	if (dev->evdev)
-		fclose(dev->evdev);
+	if (dev->uinput_fd) {
+		ioctl(dev->uinput_fd, UI_DEV_DESTROY);
+		close(dev->uinput_fd);
+	}
 	free(dev);
 	closelog();
 	return ret;
