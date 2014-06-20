@@ -134,6 +134,9 @@ static int alsa_init(struct jabra_dev *dev)
 	char *hwid[ALSA_DEV_COUNT_MAX] = { NULL, };
 	time_t deadline = time(NULL) + 5 /* 5-second timeout */;
 
+	/* allow a brief initial delay so that multiple ALSA devices can be found */
+	usleep(500000);
+
 	while (time(NULL) < deadline) {
 		/* find the Jabra device id */
 		for (idx = -1; (snd_card_next(&idx) == 0) && (idx >= 0); ) {
