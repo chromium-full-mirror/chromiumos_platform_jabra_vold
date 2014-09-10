@@ -208,12 +208,25 @@ static int hid_init(struct jabra_dev *dev)
 	char* uidev_ptr;
 	struct uinput_user_dev *uidev = calloc(1, sizeof(struct uinput_user_dev));
 
+	time_t deadline = time(NULL) + 5 /* 5-second timeout */;
+
 	if (!uidev) {
 		logd(LOG_ERR, "Failed to allocate uinput_user_dev buffer");
 		return -ENOMEM;
 	}
 
-	dev->uinput_fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
+	while (time(NULL) < deadline) {
+		dev->uinput_fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
+		if (dev->uinput_fd >= 0)
+			break;
+		logd(LOG_INFO, "uinput not started, retry later ...\n");
+		/*
+		 * uinput not started, retry later.
+		 */
+		usleep(250000);
+	}
+
+
 	if (dev->uinput_fd < 0) {
 		logd(LOG_ERR, "Cannot open uinput for HID event injection\n");
 		return -ENOMEM;
@@ -464,7 +477,16 @@ int main(int argc, char *argv[])
 			return -ENOMEM;
 		}
 		if (pid != 0) {
-			FILE* pid_file = fopen(pid_filename, "w");
+			FILE* pid_file = fopen(pid_filename, "r");
+			if (pid_file) {
+				int pid_to_kill;
+				if (fscanf(pid_file, "%d", &pid_to_kill) > 0) {
+					logd(LOG_INFO, "Stopping stale jabra_vold process %d\n", pid_to_kill);
+					kill(pid_to_kill, SIGKILL);
+				}
+				fclose(pid_file);
+			}
+			pid_file = fopen(pid_filename, "w");
 			if (!pid_file) {
 				fprintf(stderr, "Failed to open PID file to write for jabra_vold %d:%d\n",
 						busnum, devnum);
