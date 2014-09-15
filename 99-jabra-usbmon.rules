@@ -1,0 +1,2 @@
+# Make the /dev/usbmon* device only accessible by the volume group.
+SUBSYSTEM=="usbmon", OWNER="root", GROUP="volume", MODE="0660"
