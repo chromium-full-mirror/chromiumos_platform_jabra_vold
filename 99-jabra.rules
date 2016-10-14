@@ -17,7 +17,7 @@ LABEL="jabra_action"
 # start the jabra_vold daemon
 ACTION=="add", RUN+="/bin/mkdir -p /var/run/jabra_vold"
 ACTION=="add", RUN+="/bin/chown volume:volume /var/run/jabra_vold"
-ACTION=="add", RUN+="/sbin/minijail0 -u volume -g volume -G -- /usr/sbin/jabra_vold -a start -n $env{DEVNUM} -b $env{BUSNUM}"
+ACTION=="add", RUN+="/sbin/minijail0 -u volume -g volume -G -- /usr/sbin/jabra_vold -a start -n $env{DEVNUM} -b $env{BUSNUM} -p /sys/$env{DEVPATH}"
 # stop the daemon
 ACTION=="remove", RUN+="/sbin/minijail0 -u volume -g volume -G -- /usr/sbin/jabra_vold -a stop -n $env{DEVNUM} -b $env{BUSNUM}"
 
