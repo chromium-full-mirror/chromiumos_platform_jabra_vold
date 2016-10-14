@@ -15,6 +15,7 @@
 #include <syslog.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <dirent.h>
 #include <time.h>
 
 #include <alsa/asoundlib.h>
@@ -43,6 +44,7 @@ enum jabra_report {
 /* Names used by the kernel Alsa audio driver */
 #define ALSA_DEV_NAME "Jabra SPEAK"
 #define ALSA_CONTROL_NAME "PCM Playback Volume"
+#define CARD_PREFIX "card"
 
 #define KEY_CROS_VOLDOWN KEY_VOLUMEDOWN
 #define KEY_CROS_VOLUP KEY_VOLUMEUP
@@ -91,6 +93,7 @@ struct jabra_dev {
 	snd_hctl_elem_t *playback_vol[ALSA_DEV_COUNT_MAX];
 	int mon_fd;
 	int devnum;
+	int alsa_card_idx;
 };
 
 static void logd(int level, const char *fmt, ...)
@@ -140,6 +143,8 @@ static int alsa_init(struct jabra_dev *dev)
 	while (time(NULL) < deadline) {
 		/* find the Jabra device id */
 		for (idx = -1; (snd_card_next(&idx) == 0) && (idx >= 0); ) {
+			if ((-1 != dev->alsa_card_idx) && (idx != dev->alsa_card_idx))
+				continue;
 			ret = snd_card_get_name(idx, &card_name);
 			if (!ret && (strncmp(card_name, ALSA_DEV_NAME,
 				sizeof(ALSA_DEV_NAME) - 1) == 0)) {
@@ -376,7 +381,65 @@ fail_free:
 	return ret;
 }
 
-static int use_jabra_device(int busnum, int devnum, int loglvl, int errlog)
+/* Search for the sound card index under /sys/devices/, the directory
+ * path starts with the DEVPATH environment variable provided by udev,
+ * and follow by the subdirectory to sound subsustem. Example:
+ * /sys/devices/pci0000:00/0000:00:14.0/usb1/1-6/1-6:1.0/sound/
+ */
+static int find_card(char *devpath, int busnum, int devnum)
+{
+	char path[256];
+	char *tokens, *tmp, *last;
+	DIR * dir;
+	struct dirent * ptr;
+	int alsa_card_idx = -1;
+	int opendir_retry = 5;
+
+	/* Extract the last layer of directory from devpath. i.e
+	 * '1-6' from /sys/devices/pci0000:00/0000:00:14.0/usb1/1-6
+	 */
+	last = NULL;
+	tokens = strdup(devpath);
+	tmp = strtok(tokens, "/");
+	while (tmp) {
+		last = tmp;
+		tmp = strtok(NULL, "/");
+	}
+	snprintf(path, sizeof(path), "%s/%s:1.0/sound/", devpath, last);
+	free(tokens);
+
+usb_open_dir:
+	dir = opendir(path);
+	if (dir == NULL) {
+		if (errno == ENOENT) {
+			if (opendir_retry-- == 0) {
+				logd(LOG_ERR, "Open %s timeout\n", path);
+				return -EINVAL;
+			}
+			usleep(100000);
+			goto usb_open_dir;
+		}
+		logd(LOG_ERR, "Open %s fail, %s\n", path, strerror(errno));
+		return -errno;
+	}
+
+	/* Search for the file named 'cardX' where X is the sound card index
+	 * given by ALSA framework. */
+	while((ptr = readdir(dir)) != NULL) {
+		if (strncmp(CARD_PREFIX, ptr->d_name, sizeof(CARD_PREFIX) - 1))
+			continue;
+
+		alsa_card_idx = atoi(ptr->d_name + sizeof(CARD_PREFIX) - 1);
+		logd(LOG_INFO, "Successfully found card %d by parsing %s\n",
+		     alsa_card_idx, path);
+		break;
+	}
+
+	closedir(dir);
+	return alsa_card_idx;
+}
+
+static int use_jabra_device(char *devpath, int busnum, int devnum, int loglvl, int errlog)
 {
 	struct jabra_dev *dev;
 	int idx, ret;
@@ -394,6 +457,14 @@ static int use_jabra_device(int busnum, int devnum, int loglvl, int errlog)
 	if (ret)
 		goto err;
 
+	/* Look up the sound card index before alsa_init(). Set to -1 if
+	 * card index cannot be found, in which case alsa_init() will
+	 * keep all volume controls from all sound cards to use. */
+	if (devpath) {
+		ret = find_card(devpath, busnum, devnum);
+		dev->alsa_card_idx = (ret < 0) ? -1 : ret;
+	}
+
 	ret = alsa_init(dev);
 	if (ret)
 		goto err;
@@ -401,6 +472,9 @@ static int use_jabra_device(int busnum, int devnum, int loglvl, int errlog)
 	ret = usbmon_open(dev, busnum);
 	if (ret)
 		goto err;
+
+	/* Set volume is required to receive HID packets afterwards. */
+	alsa_touch_volume(dev);
 
 	usbmon_poll(dev);
 err:
@@ -426,13 +500,14 @@ int main(int argc, char *argv[])
 	char *busnum_str = getenv("BUSNUM");
 	char *devnum_str = getenv("DEVNUM");
 	char *loglevel_str = getenv("LOGLEVEL");
+	char *devpath = getenv("DEVPATH");
 	char pid_filename[128];
 	int use_stderr = 0;
 	int busnum, devnum;
 	int loglevel = LOG_NOTICE;
 	int pid;
 
-	while ((opt = getopt(argc, argv, "a:b:d:n:")) != -1) {
+	while ((opt = getopt(argc, argv, "a:b:d:n:p:")) != -1) {
 		switch (opt) {
 		case 'a':
 			action_str = optarg;
@@ -446,6 +521,10 @@ int main(int argc, char *argv[])
 			break;
 		case 'n':
 			devnum_str = optarg;
+			break;
+		case 'p':
+			if (optarg)
+				devpath = optarg;
 			break;
 		}
 	}
@@ -503,12 +582,12 @@ int main(int argc, char *argv[])
 	} else if (strcmp(action_str, "stop") == 0) {
 		FILE* pid_file = fopen(pid_filename, "r");
 		if (!pid_file) {
-			fprintf(stderr, "Failed to open PID file to read for jabra_vold %d:%d\n",
+			logd(LOG_ERR, "Failed to open PID file to read for jabra_vold %d:%d\n",
 					busnum, devnum);
 			return -ENOMEM;
 		}
 		if (fscanf(pid_file, "%d", &pid) <= 0) {
-			fprintf(stderr, "Failed to obtain PID for jabra_vold %d:%d\n",
+			logd(LOG_ERR, "Failed to obtain PID for jabra_vold %d:%d\n",
 					busnum, devnum);
 			return -ENOMEM;
 		}
@@ -522,5 +601,5 @@ int main(int argc, char *argv[])
 		return -EINVAL;
 	}
 
-	return use_jabra_device(busnum, devnum, loglevel, use_stderr);
+	return use_jabra_device(devpath, busnum, devnum, loglevel, use_stderr);
 }
