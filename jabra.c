@@ -537,7 +537,7 @@ int main(int argc, char *argv[])
 	devnum = atoi(devnum_str);
 	if (loglevel_str)
 		loglevel = atoi(loglevel_str);
-	snprintf(pid_filename, sizeof(pid_filename), "/var/run/jabra_vold/jabra_vold.%d.%d.pid",
+	snprintf(pid_filename, sizeof(pid_filename), "/run/jabra_vold/jabra_vold.%d.%d.pid",
 			busnum, devnum);
 
 	if (strcmp(action_str, "start") == 0) {
