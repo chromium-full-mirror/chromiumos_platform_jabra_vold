@@ -541,44 +541,35 @@ int main(int argc, char *argv[])
 			busnum, devnum);
 
 	if (strcmp(action_str, "start") == 0) {
-		pid = fork();
-		if (pid < 0) {
-			fprintf(stderr, "Failed to fork child process\n");
-			return -ENOMEM;
+		if (daemon(0, 0)) {
+			perror("Failed to daemonize");
+			return errno;
 		}
-		if (pid != 0) {
-			logd(LOG_INFO, "Started jabra_vold child process %d.\n", pid);
-			return 0;
-		}
-		pid = fork();
-		if (pid < 0) {
-			fprintf(stderr, "Failed to fork grandchild process\n");
-			return -ENOMEM;
-		}
-		if (pid != 0) {
-			FILE* pid_file = fopen(pid_filename, "r");
-			if (pid_file) {
-				int pid_to_kill;
-				if (fscanf(pid_file, "%d", &pid_to_kill) > 0) {
-					logd(LOG_INFO, "Stopping stale jabra_vold process %d\n", pid_to_kill);
-					kill(pid_to_kill, SIGKILL);
-				}
-				fclose(pid_file);
-			}
-			pid_file = fopen(pid_filename, "w");
-			if (!pid_file) {
-				fprintf(stderr, "Failed to open PID file to write for jabra_vold %d:%d\n",
-						busnum, devnum);
-				return -ENOMEM;
-			}
-			logd(LOG_INFO, "Started jabra_vold grandchild process %d.\n", pid);
-			if (fprintf(pid_file, "%d\n", pid) <= 0) {
-				fprintf(stderr, "Failed to write PID to the PID file.\n");
-				return -ENOMEM;
+
+		FILE* pid_file = fopen(pid_filename, "r");
+		if (pid_file) {
+			int pid_to_kill;
+			if (fscanf(pid_file, "%d", &pid_to_kill) > 0) {
+				logd(LOG_INFO, "Stopping stale jabra_vold process %d\n", pid_to_kill);
+				kill(pid_to_kill, SIGKILL);
 			}
 			fclose(pid_file);
-			return 0;
 		}
+		pid_file = fopen(pid_filename, "we");
+		if (!pid_file) {
+			fprintf(stderr, "Failed to open PID file to write for jabra_vold %d:%d: %m\n",
+				busnum, devnum);
+			return errno;
+		}
+		pid = getpid();
+		logd(LOG_INFO, "Started jabra_vold process %d.\n", pid);
+		if (fprintf(pid_file, "%d\n", pid) <= 0) {
+			int ret = errno;
+			perror("Failed to write PID to the PID file.");
+			fclose(pid_file);
+			return ret;
+		}
+		fclose(pid_file);
 	} else if (strcmp(action_str, "stop") == 0) {
 		FILE* pid_file = fopen(pid_filename, "r");
 		if (!pid_file) {
