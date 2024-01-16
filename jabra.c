@@ -506,8 +506,10 @@ int main(int argc, char *argv[])
 	int busnum, devnum;
 	int loglevel = LOG_NOTICE;
 	int pid;
+	int firmware_version = -1;
+	int model = -1;
 
-	while ((opt = getopt(argc, argv, "a:b:d:n:p:")) != -1) {
+	while ((opt = getopt(argc, argv, "a:b:d:m:n:p:v:")) != -1) {
 		switch (opt) {
 		case 'a':
 			action_str = optarg;
@@ -519,12 +521,18 @@ int main(int argc, char *argv[])
 			loglevel_str = optarg;
 			use_stderr = 1;
 			break;
+		case 'm':
+			model = atoi(optarg);
+			break;
 		case 'n':
 			devnum_str = optarg;
 			break;
 		case 'p':
 			if (optarg)
 				devpath = optarg;
+			break;
+		case 'v':
+			firmware_version = atoi(optarg);
 			break;
 		}
 	}
@@ -539,6 +547,24 @@ int main(int argc, char *argv[])
 		loglevel = atoi(loglevel_str);
 	snprintf(pid_filename, sizeof(pid_filename), "/run/jabra_vold/jabra_vold.%d.%d.pid",
 			busnum, devnum);
+
+	if (model < 0) {
+		logd(LOG_INFO,
+		     "No model info. Can't deduce if kernel HID is active\n");
+	} else if (firmware_version < 0) {
+		logd(LOG_INFO,
+		     "No firmware version. Can't deduce if kernel HID is active\n");
+	} else if (((model == 412) && firmware_version >= 111) ||
+		   (model == 510 && firmware_version >= 214)) {
+		logd(LOG_INFO,
+		     "Jabra %d with firmware version %d has kernel HID, exiting...\n",
+		     model, firmware_version);
+		return 0;
+	} else {
+		logd(LOG_INFO,
+		     "Jabra %d with firmware version %d does not have kernel HID",
+		     model, firmware_version);
+	}
 
 	if (strcmp(action_str, "start") == 0) {
 		if (daemon(0, 0)) {
